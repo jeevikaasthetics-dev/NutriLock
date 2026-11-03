@@ -81,8 +81,24 @@ footer{text-align:center;color:var(--muted);font-size:13px;margin-top:28px}
   <div class="notice"><b>Important:</b> This is only a basic word-matching aid, not an allergy detector. It may miss hidden ingredients, alternate names, or cross-contact warnings. A result cannot confirm that food is safe. Always check the full label and ask a trusted adult or healthcare professional if unsure.</div>
  </section>
  <section id="reports" class="view">
-  <div class="hero"><div class="hero-copy"><div class="eyebrow">Your documents</div><h1>My Reports</h1><p>Secure document upload is not switched on yet.</p></div></div>
-  <div class="card"><h2>Report storage is being prepared</h2><p>We will connect private cloud storage after the adult project supervisor has configured and tested Firebase Storage security rules.</p><div class="notice small">Please do not select or upload real medical reports in this development version.</div></div>
+  <div class="hero"><div class="hero-copy"><div class="eyebrow">Your documents</div><h1>Upload a Health Report</h1><p>Select a report to upload securely. Once the upload is complete, enter an email address for the analysis result.</p></div></div>
+  <div class="card">
+   <h2>1. Choose your report</h2>
+   <p class="muted small">Accepted formats: PDF, JPG and PNG. Maximum file size: 10 MB.</p>
+   <label for="reportFile">Health report file</label>
+   <input id="reportFile" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
+   <div id="uploadStatus" aria-live="polite"></div>
+   <button class="btn" id="uploadReport">Upload report</button>
+  </div>
+  <div class="card" id="emailStep" hidden>
+   <h2>2. Where should we send the result?</h2>
+   <p>Enter the email address that should receive the report analysis.</p>
+   <label for="reportEmail">Email address</label>
+   <input id="reportEmail" type="email" autocomplete="email" placeholder="you@example.com" required>
+   <button class="btn" id="analyzeReport">Analyze report and email result</button>
+   <div id="analysisStatus" aria-live="polite"></div>
+  </div>
+  <div class="notice small"><b>Privacy and safety:</b> Health reports contain sensitive information. Use only with permission and only after the project supervisor has reviewed Firebase Storage and Firestore security rules, privacy notices, consent, retention and deletion. Any automated output must be treated as informational, not a diagnosis or a substitute for a healthcare professional. Do not upload real medical records until the secure backend is deployed and tested.</div>
  </section>
  <footer>NutriLock development build · Sample information only · Not a medical service</footer>
 </main>
@@ -91,6 +107,8 @@ footer{text-align:center;color:var(--muted);font-size:13px;margin-top:28px}
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
 import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
+import { getStorage, ref as storageRef, uploadBytesResumable } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-storage.js";
+import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-functions.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA3WPCkvaSlqY5xyhCbYi22pto1TLgKHvs",
@@ -105,6 +123,8 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const storage = getStorage(app);
+const functions = getFunctions(app);
 const provider = new GoogleAuthProvider();
 provider.setCustomParameters({ prompt: "select_account" });
 
@@ -193,6 +213,89 @@ document.getElementById("saveProfile").addEventListener("click", async () => {
     console.error("Profile save error:", error);
     showMessage(message, "Could not save. Firestore may not be enabled or its security rules may not be configured yet.", "error");
   } finally { button.disabled = false; }
+});
+
+let uploadedReportPath = "";
+let uploadedReportName = "";
+
+document.getElementById("uploadReport").addEventListener("click", async () => {
+  const user = auth.currentUser;
+  const fileInput = document.getElementById("reportFile");
+  const status = document.getElementById("uploadStatus");
+  const button = document.getElementById("uploadReport");
+  const file = fileInput.files && fileInput.files[0];
+  if (!user) return showMessage(status, "Please sign in again before uploading.", "error");
+  if (!file) return showMessage(status, "Choose a PDF, JPG or PNG report first.", "error");
+  const allowed = ["application/pdf", "image/jpeg", "image/png"];
+  if (!allowed.includes(file.type)) return showMessage(status, "That file type is not supported. Choose a PDF, JPG or PNG.", "error");
+  if (file.size > 10 * 1024 * 1024) return showMessage(status, "The file is larger than 10 MB. Choose a smaller file.", "error");
+
+  button.disabled = true;
+  showMessage(status, "Uploading your report securely…");
+  try {
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 100);
+    uploadedReportPath = `users/${user.uid}/reports/${Date.now()}_${safeName}`;
+    uploadedReportName = file.name;
+    const target = storageRef(storage, uploadedReportPath);
+    const task = uploadBytesResumable(target, file, {
+      contentType: file.type,
+      customMetadata: { ownerUid: user.uid }
+    });
+    await new Promise((resolve, reject) => {
+      task.on("state_changed",
+        snapshot => {
+          const percent = Math.round(snapshot.bytesTransferred / snapshot.totalBytes * 100);
+          showMessage(status, `Uploading… ${percent}%`);
+        },
+        reject,
+        resolve
+      );
+    });
+    showMessage(status, "Report uploaded. Next, enter the email address for the result.", "success");
+    document.getElementById("emailStep").hidden = false;
+  } catch (error) {
+    console.error("Report upload error:", error);
+    uploadedReportPath = "";
+    showMessage(status, "Upload failed. The project supervisor may need to enable Firebase Storage and configure private per-user security rules.", "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById("analyzeReport").addEventListener("click", async () => {
+  const user = auth.currentUser;
+  const email = document.getElementById("reportEmail").value.trim();
+  const status = document.getElementById("analysisStatus");
+  const button = document.getElementById("analyzeReport");
+  if (!user) return showMessage(status, "Please sign in again.", "error");
+  if (!uploadedReportPath) return showMessage(status, "Upload a report before requesting analysis.", "error");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return showMessage(status, "Enter a valid email address.", "error");
+
+  button.disabled = true;
+  showMessage(status, "Submitting your report for secure analysis and email delivery…");
+  try {
+    const processReport = httpsCallable(functions, "processHealthReport");
+    const result = await processReport({
+      storagePath: uploadedReportPath,
+      recipientEmail: email,
+      fileName: uploadedReportName
+    });
+    const data = result.data || {};
+    if (data.emailSent === true) {
+      showMessage(status, "Your report was processed and the result email was sent. Please check your inbox and spam folder.", "success");
+    } else {
+      showMessage(status, "The backend received the request, but email delivery has not been confirmed. Please contact the project supervisor.", "notice");
+    }
+  } catch (error) {
+    console.error("Report analysis error:", error);
+    const code = error.code || "";
+    const message = code.includes("not-found")
+      ? "The secure analysis service is not deployed yet. The upload is saved, but analysis and email sending are not active. Ask the project supervisor to deploy the processHealthReport Firebase Function and configure its AI and email services."
+      : "The report could not be processed. Check that the secure backend is deployed and configured, then try again.";
+    showMessage(status, message, "error");
+  } finally {
+    button.disabled = false;
+  }
 });
 
 document.getElementById("checkFood").addEventListener("click", () => {
